@@ -2,4 +2,4 @@ data
 .env
 ai-memory.md
 *.code-workplace
-googledriverag/__pycache__/*
+*/__pycache__/*
