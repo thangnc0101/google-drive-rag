@@ -1,0 +1,5 @@
+data
+.env
+ai-memory.md
+*.code-workplace
+googledriverag/__pycache__/*
