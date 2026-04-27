@@ -1,0 +1,85 @@
+# =============================================================================
+# GoogleDriveRAG — Default Configuration
+# This file contains all default values. Override via config.yaml
+# or --config <path> at startup.
+# =============================================================================
+
+# --- API Server ---
+server:
+  host: "0.0.0.0"          # Bind address (0.0.0.0 = all interfaces)
+  port: 8000                # HTTP port
+  workers: 1                # Number of uvicorn workers
+  log_level: "INFO"         # Logging level: DEBUG | INFO | WARNING | ERROR | CRITICAL
+
+# --- Basic Auth for API (optional) ---
+# Leave empty to disable authentication entirely.
+auth:
+  username: ""
+  password: ""
+
+# --- Namespaces (each namespace maps to one or more Google Drive folders) ---
+# Each entry: name, description, folder_ids[]
+# Example:
+#   namespaces:
+#     - name: "hr-docs"
+#       description: "Human Resources documents"
+#       folder_ids:
+#         - "1ABC_your_google_drive_folder_id"
+namespaces: []
+
+# --- Google Drive sync ---
+google_drive:
+  credentials_file: ""                # Path to service account JSON
+  poll_interval_seconds: 300          # Polling interval for Drive changes (seconds)
+  sync_on_startup: true               # Run sync immediately on app startup
+  file_types:                         # Allowed MIME types for ingestion
+    - "application/pdf"
+    - "application/vnd.google-apps.document"
+    - "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    - "text/plain"
+    - "text/markdown"
+  max_file_size_mb: 1                # Max file size limit (MB)
+
+# --- LLM (used for enrichment & query answering) ---
+llm:
+  base_url: ""                        # OpenAI-compatible API endpoint
+  api_key: ""                         # API key, prefer ${LLM_API_KEY}
+  enrichment_model: "google/gemini-2.0-flash-001"   # Model for entity extraction & enrichment
+  query_model: "google/gemini-2.5-flash"            # Model for query answering
+  max_concurrent_requests: 5          # Max concurrent requests to LLM
+
+# --- Embedding ---
+embedding:
+  base_url: ""                        # OpenAI-compatible embedding endpoint
+  api_key: ""                         # API key, prefer ${LLM_API_KEY}
+  model: "openai/text-embedding-3-small"  # Embedding model
+  dimensions: 512                     # Output vector dimensions
+
+# --- Chunking (document splitting) ---
+chunking:
+  max_chunk_tokens: 512               # Max tokens per chunk
+  overlap_tokens: 50                  # Overlap tokens between adjacent chunks
+
+# --- Retrieval (search & answering) ---
+retrieval:
+  default_mode: "mix"                 # Default search mode: local | global | hybrid | mix
+  default_namespaces: []              # Default namespaces for queries (empty = all)
+  top_k: 5                            # Number of chunks to return
+  rrf_k: 60                           # Constant k in Reciprocal Rank Fusion
+  graph_traversal_depth: 2            # Graph traversal depth from matched entities
+  chunk_context_default_window: 2     # Number of neighboring chunks included per result chunk
+  max_entity_tokens: 4000             # Token budget for entity descriptions in context
+  max_relation_tokens: 4000           # Token budget for relationship descriptions
+  max_total_tokens: 16000             # Total token budget for context sent to LLM
+  enable_community_search: true       # Enable Louvain community detection in global search
+  enable_gleaning: false              # Enable 2nd-pass LLM extraction (higher recall, extra API call)
+  enable_batch_contextual_enrichment: true   # Batch chunks and call LLM to generate contextual keywords
+  batch_contextual_enrichment_size: 5        # Number of chunks per enrichment batch
+  enable_llm_summary: false           # Summarize entity descriptions via LLM (when too many)
+  llm_summary_min_descriptions: 6     # Threshold to trigger LLM summarization
+  show_references: false              # Show citation [ref] in answers
+  query_response_markdown: false      # Return answers as markdown (true) or plain text (false)
+
+# --- Storage ---
+storage:
+  data_dir: "./data"                  # Directory for SQLite, hnswlib indexes, graph files

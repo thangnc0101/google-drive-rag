@@ -1,0 +1,13 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./service-account.json:/app/service-account.json:ro
+      - ./data:/app/data
+    environment:
+      - LLM_API_KEY=${LLM_API_KEY}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-changeme}
+    restart: unless-stopped

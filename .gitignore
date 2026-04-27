@@ -1,5 +1,5 @@
 data
 .env
 ai-memory.md
-*.code-workplace
-*/__pycache__/*
+*.code-workspace
+**/__pycache__/

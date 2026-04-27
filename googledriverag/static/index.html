@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GoogleDriveRAG</title>
+<link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/vue@3.4.27/dist/vue.global.prod.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/vue-router@4.3.2/dist/vue-router.global.prod.js"></script>
+<style>
+[v-cloak] { display: none; }
+.chunk-target { background-color: #fef3c7; border-left: 4px solid #f59e0b; }
+.tag-selected { background-color: #3b82f6; color: white; }
+.tag-unselected { background-color: #e5e7eb; color: #374151; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+</style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+<div id="app" v-cloak>
+  <div class="bg-white shadow-sm border-b">
+    <div class="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+      <h1 class="text-xl font-semibold text-gray-800">GoogleDriveRAG</h1>
+      <div class="flex gap-2">
+        <router-link to="/" custom v-slot="{ navigate, isExactActive }">
+          <button @click="navigate" class="px-3 py-1 text-sm rounded border hover:bg-gray-50" :class="isExactActive ? 'bg-blue-50 border-blue-300' : 'border-gray-300'">Search</button>
+        </router-link>
+        <router-link to="/api-history" custom v-slot="{ navigate, isExactActive }">
+          <button @click="navigate" class="px-3 py-1 text-sm rounded border hover:bg-gray-50" :class="isExactActive ? 'bg-blue-50 border-blue-300' : 'border-gray-300'">API History</button>
+        </router-link>
+        <router-link to="/settings" custom v-slot="{ navigate, isExactActive }">
+          <button @click="navigate" class="px-3 py-1 text-sm rounded border hover:bg-gray-50" :class="isExactActive ? 'bg-blue-50 border-blue-300' : 'border-gray-300'">Settings</button>
+        </router-link>
+      </div>
+    </div>
+  </div>
+  <div class="max-w-6xl mx-auto px-4 py-4">
+    <router-view></router-view>
+  </div>
+</div>
+
+<script>window.DEFAULT_MODE = '__DEFAULT_MODE__';</script>
+<script src="/static/shared.js?v=__APP_VERSION__"></script>
+<script src="/static/search.js?v=__APP_VERSION__"></script>
+<script src="/static/api-history.js?v=__APP_VERSION__"></script>
+<script src="/static/stats.js?v=__APP_VERSION__"></script>
+<script src="/static/settings.js?v=__APP_VERSION__"></script>
+<script src="/static/app.js?v=__APP_VERSION__"></script>
+</body>
+</html>

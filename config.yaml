@@ -1,0 +1,22 @@
+namespaces:
+  - name: "hr-docs"
+    description: "HR documents"
+    folder_ids:
+      - "id folder"
+
+google_drive:
+  credentials_file: "credential.json"
+
+llm:
+  base_url: "https://openrouter.ai/api/v1"
+  api_key: "${LLM_API_KEY}"
+  enrichment_model: "openai/gpt-oss-20b:nitro"
+  query_model: "openai/gpt-oss-20b:nitro"
+
+embedding:
+  base_url: "https://openrouter.ai/api/v1"
+  api_key: "${LLM_API_KEY}"
+  model: "qwen/qwen3-embedding-8b"
+
+server:
+  log_level: "DEBUG"

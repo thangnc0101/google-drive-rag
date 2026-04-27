@@ -1,0 +1,10 @@
+__pycache__
+*.pyc
+.pytest_cache
+.vscode
+.kiro
+.git
+data/
+*.db
+*.db-shm
+*.db-wal
