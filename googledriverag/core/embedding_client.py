@@ -6,8 +6,11 @@ import logging
 import httpx
 
 from googledriverag.config import EmbeddingConfig
+from googledriverag.core.errors import ExternalAPIError
 
 logger = logging.getLogger(__name__)
+
+_RETRIABLE_STATUS = {401, 402, 403, 408, 429, 500, 502, 503, 504}
 
 
 class EmbeddingClient:
@@ -39,17 +42,40 @@ class EmbeddingClient:
     async def embed_batch(self, texts: list[str], call_context: dict | None = None) -> list[list[float]]:
         if not texts:
             return []
+        max_batch = 64
+        if len(texts) <= max_batch:
+            return await self._embed_batch_single(texts, call_context)
+        all_vectors: list[list[float]] = []
+        for start in range(0, len(texts), max_batch):
+            batch = texts[start:start + max_batch]
+            vectors = await self._embed_batch_single(batch, call_context)
+            all_vectors.extend(vectors)
+        return all_vectors
+
+    async def _embed_batch_single(self, texts: list[str], call_context: dict | None = None) -> list[list[float]]:
+        if not texts:
+            return []
         async with self._semaphore:
             client = await self._get_client()
-            resp = await client.post(
-                f"{self.config.base_url}/embeddings",
-                headers={"Authorization": f"Bearer {self.config.api_key}"},
-                json={
-                    "model": self.config.model,
-                    "input": texts,
-                    "dimensions": self.config.dimensions,
-                },
-            )
+            body = {
+                "model": self.config.model,
+                "input": texts,
+                "dimensions": self.config.dimensions,
+            }
+            if self.config.provider_sort:
+                body["provider"] = {"sort": self.config.provider_sort}
+            try:
+                resp = await client.post(
+                    f"{self.config.base_url}/embeddings",
+                    headers={"Authorization": f"Bearer {self.config.api_key}"},
+                    json=body,
+                )
+            except (httpx.TransportError, httpx.TimeoutException) as e:
+                raise ExternalAPIError(f"Embedding API network error: {e}") from e
+            if resp.status_code in _RETRIABLE_STATUS:
+                raise ExternalAPIError(
+                    f"Embedding API returned {resp.status_code}: {resp.text[:200]}"
+                )
             resp.raise_for_status()
             data = resp.json()
             self._record_call(len(texts), data, call_context)

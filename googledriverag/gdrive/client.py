@@ -35,11 +35,20 @@ class DriveClient:
         )
         self.service = build("drive", "v3", credentials=creds)
 
+    def _parse_size(self, raw) -> int | None:
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
     def list_files(self, folder_id: str) -> list[DriveFile]:
         self._ensure_service()
         query = f"'{folder_id}' in parents and trashed = false"
         results = []
         page_token = None
+        max_size_bytes = int(self.config.max_file_size_mb * 1024 * 1024)
         while True:
             resp = self.service.files().list(
                 q=query,
@@ -50,11 +59,47 @@ class DriveClient:
                 if f["mimeType"] == "application/vnd.google-apps.folder":
                     results.extend(self.list_files(f["id"]))
                 elif f["mimeType"] in self.config.file_types:
+                    size = self._parse_size(f.get("size"))
+                    if size is not None and size > max_size_bytes:
+                        logger.warning(
+                            "Skipping file %s (id=%s): size %.2f MB exceeds max_file_size_mb=%.2f",
+                            f["name"], f["id"], size / (1024 * 1024),
+                            self.config.max_file_size_mb,
+                        )
+                        continue
                     results.append(DriveFile(
                         id=f["id"], name=f["name"], mimeType=f["mimeType"],
-                        modifiedTime=f["modifiedTime"], size=f.get("size"),
+                        modifiedTime=f["modifiedTime"], size=size,
                         webViewLink=f.get("webViewLink", ""),
                     ))
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+        return results
+
+    def list_oversized_files(self, folder_id: str) -> list[DriveFile]:
+        self._ensure_service()
+        query = f"'{folder_id}' in parents and trashed = false"
+        results: list[DriveFile] = []
+        page_token = None
+        max_size_bytes = int(self.config.max_file_size_mb * 1024 * 1024)
+        while True:
+            resp = self.service.files().list(
+                q=query,
+                fields="nextPageToken, files(id, name, mimeType, modifiedTime, size, webViewLink)",
+                pageToken=page_token,
+            ).execute()
+            for f in resp.get("files", []):
+                if f["mimeType"] == "application/vnd.google-apps.folder":
+                    results.extend(self.list_oversized_files(f["id"]))
+                elif f["mimeType"] in self.config.file_types:
+                    size = self._parse_size(f.get("size"))
+                    if size is not None and size > max_size_bytes:
+                        results.append(DriveFile(
+                            id=f["id"], name=f["name"], mimeType=f["mimeType"],
+                            modifiedTime=f["modifiedTime"], size=size,
+                            webViewLink=f.get("webViewLink", ""),
+                        ))
             page_token = resp.get("nextPageToken")
             if not page_token:
                 break
@@ -69,7 +114,7 @@ class DriveClient:
             ).execute()
             return DriveFile(
                 id=f["id"], name=f["name"], mimeType=f["mimeType"],
-                modifiedTime=f["modifiedTime"], size=f.get("size"),
+                modifiedTime=f["modifiedTime"], size=self._parse_size(f.get("size")),
                 webViewLink=f.get("webViewLink", ""),
             )
         except Exception:

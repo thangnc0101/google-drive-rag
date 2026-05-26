@@ -9,5 +9,4 @@ services:
       - ./data:/app/data
     environment:
       - LLM_API_KEY=${LLM_API_KEY}
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-changeme}
     restart: unless-stopped

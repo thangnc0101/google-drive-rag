@@ -38,7 +38,7 @@ google_drive:
     - "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     - "text/plain"
     - "text/markdown"
-  max_file_size_mb: 1                # Max file size limit (MB)
+  max_file_size_mb: 0.1                # Max file size limit (MB), supports decimal e.g. 0.5
 
 # --- LLM (used for enrichment & query answering) ---
 llm:
@@ -54,6 +54,7 @@ embedding:
   api_key: ""                         # API key, prefer ${LLM_API_KEY}
   model: "openai/text-embedding-3-small"  # Embedding model
   dimensions: 512                     # Output vector dimensions
+  provider_sort: ""                   # OpenRouter provider sort: latency | throughput | price (empty = default)
 
 # --- Chunking (document splitting) ---
 chunking:

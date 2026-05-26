@@ -11,6 +11,7 @@ from googledriverag.config import RetrievalConfig
 from googledriverag.core.chunker import Chunk, Chunker
 from googledriverag.core.document_parser import DocumentParser
 from googledriverag.core.embedding_client import EmbeddingClient
+from googledriverag.core.errors import ExternalAPIError
 from googledriverag.core.llm_client import LLMClient
 from googledriverag.core.llm_enrichment import (
     EnrichmentResult,
@@ -69,44 +70,40 @@ class IngestionService:
         storage: NamespaceStorage,
         drive_modified_time: str = "",
         url: str = "",
+        force_reindex: bool = False,
     ) -> IngestResult:
         storage.ensure_loaded()
 
-        doc_id = "doc-" + hashlib.md5(file_bytes).hexdigest()[:12]
+        doc_id = f"gdrive-{drive_file_id}"
         content_hash = hashlib.md5(file_bytes).hexdigest()
 
         existing = storage.sqlite.get_document(doc_id)
-        if existing and existing.content_hash == content_hash:
-            logger.debug("Document %s unchanged (hash=%s), skipping ingestion", filename, content_hash[:8])
-            if drive_modified_time and existing.drive_modified_time != drive_modified_time:
-                logger.debug("Updating drive_modified_time for %s: %s -> %s",
-                             filename, existing.drive_modified_time, drive_modified_time)
-                existing.drive_modified_time = drive_modified_time
-                storage.sqlite.upsert_document(existing)
+        if not existing:
+            legacy = storage.sqlite.get_document_by_drive_id(drive_file_id)
+            if legacy and legacy.doc_id != doc_id:
+                logger.info("Migrating document %s: old_id=%s -> new_id=%s", filename, legacy.doc_id, doc_id)
+                self._purge_document_data(legacy.doc_id, storage)
+                storage.sqlite.delete_document_row(legacy.doc_id)
+
+        if existing and existing.status == "processing":
+            logger.info("Document %s is already being processed, skipping", filename)
             return IngestResult(doc_id=doc_id, filename=filename, chunks_count=0,
                                 entities_count=0, relationships_count=0)
 
-        if existing:
-            logger.debug("Document %s content changed (old_hash=%s, new_hash=%s), re-indexing",
-                         filename, existing.content_hash[:8] if existing.content_hash else "none", content_hash[:8])
-            old_chunk_ids = [
-                r.chunk_id for r in storage.sqlite.get_chunks_by_doc(doc_id)
-            ]
+        if existing and existing.content_hash == content_hash and not force_reindex:
+            logger.debug("Document %s unchanged (hash=%s), skipping ingestion", filename, content_hash[:8])
+            self._update_metadata_if_changed(existing, filename, drive_modified_time, url, len(file_bytes), storage)
+            return IngestResult(doc_id=doc_id, filename=filename, chunks_count=0,
+                                entities_count=0, relationships_count=0)
 
-            orphaned_entities, orphaned_relations = (
-                storage.sqlite.find_orphaned_after_chunk_delete(old_chunk_ids)
-            )
+        is_reindex = existing is not None
+        old_chunk_ids: list[str] = []
+        if is_reindex:
+            logger.info("Document %s content changed (old_hash=%s, new_hash=%s), re-indexing",
+                        filename, existing.content_hash[:8] if existing.content_hash else "none", content_hash[:8])
+            old_chunk_ids = [r.chunk_id for r in storage.sqlite.get_chunks_by_doc(doc_id)]
 
-            storage.sqlite.delete_chunks_by_doc(doc_id)
-            for cid in old_chunk_ids:
-                storage.vectors.chunks.delete(cid)
-
-            for entity_name in orphaned_entities:
-                storage.graph.remove_node(entity_name)
-                storage.vectors.entities.delete(entity_name)
-            for src, tgt in orphaned_relations:
-                storage.graph.remove_edge(src, tgt)
-                storage.vectors.relationships.delete(f"{src}||{tgt}")
+        await self._preflight_check(storage.ns_name)
 
         progress_key = f"{storage.ns_name}:{doc_id}"
         if self.progress:
@@ -124,14 +121,105 @@ class IngestionService:
                 file_bytes, filename, mime_type, drive_file_id, storage,
                 doc_id, content_hash, drive_modified_time, url, progress_key,
             )
+            if is_reindex and old_chunk_ids:
+                self._purge_old_chunks(doc_id, old_chunk_ids, storage)
             storage.sqlite.update_document_status(doc_id, "indexed")
             return result
-        except Exception:
-            storage.sqlite.update_document_status(doc_id, "error")
+        except Exception as e:
+            logger.error("Ingestion failed for %s (doc_id=%s): %s", filename, doc_id, e, exc_info=True)
+            if is_reindex:
+                logger.warning("Restoring previous record for %s after failed re-index", filename)
+                storage.sqlite.upsert_document(existing)
+            else:
+                storage.sqlite.update_document_status(doc_id, "error")
             raise
         finally:
             if self.progress:
                 self.progress.finish_document(progress_key)
+
+    async def _preflight_check(self, namespace: str) -> None:
+        """Verify external embedding API is reachable before mutating storage.
+
+        Raises ExternalAPIError if the API is unreachable, quota-exceeded, or
+        returns an auth/server error. Caller should abort ingestion without
+        touching document state.
+        """
+        try:
+            await self.embedding.embed_batch(
+                ["ping"],
+                call_context=dict(operation="preflight", namespace=namespace),
+            )
+        except ExternalAPIError:
+            raise
+        except Exception as e:
+            raise ExternalAPIError(f"Preflight embedding check failed: {e}") from e
+
+    def _update_metadata_if_changed(
+        self, existing: DocumentRecord, filename: str,
+        drive_modified_time: str, url: str, file_size: int,
+        storage: NamespaceStorage,
+    ) -> None:
+        changed = False
+        if drive_modified_time and existing.drive_modified_time != drive_modified_time:
+            existing.drive_modified_time = drive_modified_time
+            changed = True
+        if filename and existing.name != filename:
+            logger.debug("Updating name for %s: %s -> %s", existing.doc_id, existing.name, filename)
+            existing.name = filename
+            changed = True
+        if url and existing.url != url:
+            existing.url = url
+            changed = True
+        if file_size and existing.file_size != file_size:
+            existing.file_size = file_size
+            changed = True
+        if changed:
+            existing.synced_at = datetime.now(timezone.utc).isoformat()
+            storage.sqlite.upsert_document(existing)
+
+    def _purge_document_data(self, doc_id: str, storage: NamespaceStorage) -> None:
+        old_chunk_ids = [
+            r.chunk_id for r in storage.sqlite.get_chunks_by_doc(doc_id)
+        ]
+
+        orphaned_entities, orphaned_relations = (
+            storage.sqlite.find_orphaned_after_chunk_delete(old_chunk_ids)
+        )
+
+        storage.sqlite.delete_chunks_by_doc(doc_id)
+        for cid in old_chunk_ids:
+            storage.vectors.chunks.delete(cid)
+
+        for entity_name in orphaned_entities:
+            storage.graph.remove_node(entity_name)
+            storage.vectors.entities.delete(entity_name)
+        for src, tgt in orphaned_relations:
+            storage.graph.remove_edge(src, tgt)
+            storage.vectors.relationships.delete(f"{src}||{tgt}")
+
+    def _purge_old_chunks(self, doc_id: str, old_chunk_ids: list[str], storage: NamespaceStorage) -> None:
+        current_chunk_ids = {r.chunk_id for r in storage.sqlite.get_chunks_by_doc(doc_id)}
+        stale_ids = [cid for cid in old_chunk_ids if cid not in current_chunk_ids]
+        if not stale_ids:
+            return
+
+        logger.debug("Purging %d stale chunks for %s", len(stale_ids), doc_id)
+        orphaned_entities, orphaned_relations = (
+            storage.sqlite.find_orphaned_after_chunk_delete(stale_ids)
+        )
+
+        storage.sqlite.delete_mappings_by_chunks(stale_ids)
+        for cid in stale_ids:
+            storage.sqlite.conn.execute("DELETE FROM chunks WHERE chunk_id = ?", (cid,))
+            storage.vectors.chunks.delete(cid)
+        storage.sqlite.conn.commit()
+
+        for entity_name in orphaned_entities:
+            storage.graph.remove_node(entity_name)
+            storage.vectors.entities.delete(entity_name)
+        for src, tgt in orphaned_relations:
+            storage.graph.remove_edge(src, tgt)
+            storage.vectors.relationships.delete(f"{src}||{tgt}")
 
     async def _do_ingest(
         self, file_bytes, filename, mime_type, drive_file_id, storage,
@@ -227,26 +315,32 @@ class IngestionService:
                     continue
                 entity_map.setdefault(key, []).append((entity, chunk.chunk_id))
 
+        prepared: list[tuple[str, str, str, list[str]]] = []
         for name, occurrences in entity_map.items():
             existing = storage.graph.get_node(name)
-
             type_ = Counter(e.type for e, _ in occurrences).most_common(1)[0][0]
-
             descriptions = [e.description for e, _ in occurrences if e.description]
             if existing and existing.get("description"):
                 descriptions.insert(0, existing["description"])
             merged_desc = await self._merge_descriptions_async(descriptions, namespace=namespace)
+            chunk_ids = [cid for _, cid in occurrences]
+            prepared.append((name, type_, merged_desc, chunk_ids))
 
-            storage.graph.upsert_node(name, entity_type=type_, description=merged_desc)
-
-            embed_text = f"{name}\n{merged_desc}" if merged_desc else name
-            vector = await self.embedding.embed(
-                embed_text,
+        embed_texts = [
+            f"{name}\n{desc}" if desc else name
+            for name, _, desc, _ in prepared
+        ]
+        if embed_texts:
+            vectors = await self.embedding.embed_batch(
+                embed_texts,
                 call_context=dict(operation="entity_embedding", namespace=namespace),
             )
-            storage.vectors.entities.add(name, vector, {"name": name, "type": type_})
+        else:
+            vectors = []
 
-            chunk_ids = [cid for _, cid in occurrences]
+        for (name, type_, merged_desc, chunk_ids), vector in zip(prepared, vectors):
+            storage.graph.upsert_node(name, entity_type=type_, description=merged_desc)
+            storage.vectors.entities.add(name, vector, {"name": name, "type": type_})
             storage.sqlite.upsert_entity_chunks(name, chunk_ids)
 
         return len(entity_map)
@@ -268,6 +362,7 @@ class IngestionService:
                 key = tuple(sorted([src, tgt]))
                 rel_map.setdefault(key, []).append((rel, chunk.chunk_id))
 
+        prepared: list[tuple[str, str, str, str, float, list[str]]] = []
         for (src, tgt), occurrences in rel_map.items():
             existing = storage.graph.get_edge(src, tgt)
 
@@ -291,21 +386,28 @@ class IngestionService:
 
             merged_desc = await self._merge_descriptions_async(descriptions, namespace=namespace)
             keywords_str = ", ".join(sorted(all_keywords))
+            chunk_ids = [cid for _, cid in occurrences]
+            prepared.append((src, tgt, merged_desc, keywords_str, weight, chunk_ids))
 
+        embed_texts = [
+            f"{kw}\t{src}\n{tgt}\n{desc}"
+            for src, tgt, desc, kw, _, _ in prepared
+        ]
+        if embed_texts:
+            vectors = await self.embedding.embed_batch(
+                embed_texts,
+                call_context=dict(operation="relation_embedding", namespace=namespace),
+            )
+        else:
+            vectors = []
+
+        for (src, tgt, merged_desc, keywords_str, weight, chunk_ids), vector in zip(prepared, vectors):
             storage.graph.upsert_edge(
                 src, tgt, weight=weight, description=merged_desc, keywords=keywords_str,
-            )
-
-            embed_text = f"{keywords_str}\t{src}\n{tgt}\n{merged_desc}"
-            vector = await self.embedding.embed(
-                embed_text,
-                call_context=dict(operation="relation_embedding", namespace=namespace),
             )
             storage.vectors.relationships.add(
                 f"{src}||{tgt}", vector, {"src": src, "tgt": tgt, "keywords": keywords_str},
             )
-
-            chunk_ids = [cid for _, cid in occurrences]
             storage.sqlite.upsert_relation_chunks(src, tgt, chunk_ids)
 
         return len(rel_map)

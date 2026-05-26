@@ -75,6 +75,14 @@ def create_app(config: AppConfig) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         logger.info("GoogleDriveRAG starting up")
+        for ns_name in ns_manager.list_all_names():
+            try:
+                storage = ns_manager.get_storage(ns_name)
+                reset_count = storage.sqlite.reset_stuck_processing()
+                if reset_count > 0:
+                    logger.warning("Reset %d stuck 'processing' documents in namespace '%s'", reset_count, ns_name)
+            except Exception as e:
+                logger.error("Failed to reset stuck documents in %s: %s", ns_name, e)
         startup_sync_task = None
         scheduler = None
         if sync_service:

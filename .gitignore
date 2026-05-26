@@ -3,3 +3,4 @@ data
 ai-memory.md
 *.code-workspace
 **/__pycache__/
+.idea

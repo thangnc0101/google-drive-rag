@@ -142,6 +142,13 @@ class SQLiteStore:
         self.conn.execute("UPDATE documents SET status = ? WHERE doc_id = ?", (status, doc_id))
         self.conn.commit()
 
+    def reset_stuck_processing(self) -> int:
+        cursor = self.conn.execute(
+            "UPDATE documents SET status = 'error' WHERE status = 'processing'"
+        )
+        self.conn.commit()
+        return cursor.rowcount
+
     def get_document(self, doc_id: str) -> DocumentRecord | None:
         row = self.conn.execute("SELECT * FROM documents WHERE doc_id = ?", (doc_id,)).fetchone()
         if row is None:

@@ -73,3 +73,44 @@ async def trigger_sync(request: Request):
     import asyncio
     asyncio.create_task(sync_service.sync_all())
     return {"status": "started"}
+
+
+@router.get("/oversized-files", dependencies=[Depends(verify_auth)])
+async def list_oversized_files(request: Request):
+    config = request.app.state.config
+    sync_service = getattr(request.app.state, "sync_service", None)
+    max_mb = config.google_drive.max_file_size_mb
+    if not sync_service:
+        return {"max_file_size_mb": max_mb, "files": []}
+
+    drive_client = sync_service.drive
+    ns_manager: NamespaceManager = request.app.state.namespace_manager
+
+    seen: set[str] = set()
+    files: list[dict] = []
+    for ns_name in ns_manager.list_all_names():
+        try:
+            ns_config = ns_manager.get_config(ns_name)
+        except Exception:
+            continue
+        for folder_id in ns_config.folder_ids:
+            try:
+                oversized = drive_client.list_oversized_files(folder_id)
+            except Exception:
+                continue
+            for f in oversized:
+                if f.id in seen:
+                    continue
+                seen.add(f.id)
+                files.append({
+                    "namespace": ns_name,
+                    "id": f.id,
+                    "name": f.name,
+                    "mime_type": f.mimeType,
+                    "size": f.size,
+                    "url": f.webViewLink,
+                    "modified_time": f.modifiedTime,
+                })
+
+    files.sort(key=lambda x: x.get("size") or 0, reverse=True)
+    return {"max_file_size_mb": max_mb, "files": files}

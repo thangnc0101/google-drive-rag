@@ -17,6 +17,8 @@ class SourceItem(BaseModel):
     namespace: str = ""
     chunk_id: str = ""
     page: int | None = None
+    file_name: str = ""
+    url: str = ""
 
 
 class ChunkItem(BaseModel):

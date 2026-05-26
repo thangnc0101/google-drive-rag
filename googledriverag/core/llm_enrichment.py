@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass, field
 
 from googledriverag.core.chunker import Chunk
+from googledriverag.core.errors import ExternalAPIError
 from googledriverag.core.llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
@@ -119,6 +120,8 @@ class LLMEnrichment:
                     result = self._merge_results(result, gleaned)
 
                 return result
+            except ExternalAPIError:
+                raise
             except Exception as e:
                 logger.warning("Enrichment failed for chunk %s: %s", chunk.chunk_id, e)
                 return EnrichmentResult()
@@ -133,6 +136,8 @@ class LLMEnrichment:
             ctx = dict(operation="gleaning", document_name=filename, chunk_id=chunk.chunk_id, namespace=namespace)
             response = await self.llm.complete(prompt, model_type="enrichment", call_context=ctx)
             return self._parse_response(response)
+        except ExternalAPIError:
+            raise
         except Exception as e:
             logger.warning("Gleaning failed for chunk %s: %s", chunk.chunk_id, e)
             return EnrichmentResult()
@@ -203,6 +208,8 @@ class LLMEnrichment:
                     result = self._merge_results(result, gleaned)
 
                 return result
+            except ExternalAPIError:
+                raise
             except Exception as e:
                 logger.warning("Enrichment failed for chunk %s: %s", chunk.chunk_id, e)
                 return EnrichmentResult()
@@ -246,6 +253,8 @@ class LLMEnrichment:
                            document_name=filename, namespace=namespace)
                 response = await self.llm.complete(prompt, model_type="enrichment", call_context=ctx)
                 return self._parse_batch_contextual_response(response, count)
+            except ExternalAPIError:
+                raise
             except Exception as e:
                 logger.warning("Batch contextual enrichment failed: %s", e)
                 return [[] for _ in range(count)]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from googledriverag.core.errors import ExternalAPIError
 from googledriverag.dependencies import get_namespace_manager, verify_auth
 from googledriverag.models.document import DocumentDeleteResponse, DocumentListItem
 from googledriverag.services.namespace_manager import NamespaceManager
@@ -62,21 +63,28 @@ async def reindex_document(
         raise HTTPException(status_code=400, detail="Document has no Drive file ID, cannot reindex")
 
     sync_svc = request.app.state.sync_service
-    sync_svc._delete_document(storage, doc_id)
 
     drive_file = sync_svc.drive.get_file_metadata(doc.drive_file_id)
     if not drive_file:
         raise HTTPException(status_code=404, detail="File no longer exists on Google Drive")
 
-    await sync_svc._ingest_file(storage, drive_file)
-    storage.graph.detect_communities()
-    storage.graph.save()
+    try:
+        result = await sync_svc._ingest_file(storage, drive_file, force_reindex=True)
+    except ExternalAPIError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"External API unavailable, reindex skipped: {e}",
+        )
+    if result and result.chunks_count > 0:
+        storage.graph.detect_communities()
+        storage.graph.save()
 
-    new_doc = storage.sqlite.get_document_by_drive_id(doc.drive_file_id)
-    chunks_count = storage.sqlite.count_chunks_by_doc(new_doc.doc_id) if new_doc else 0
+    actual_doc_id = result.doc_id if result else doc_id
+    new_doc = storage.sqlite.get_document(actual_doc_id)
+    chunks_count = storage.sqlite.count_chunks_by_doc(actual_doc_id) if new_doc else 0
     return {
-        "id": new_doc.doc_id if new_doc else doc_id,
-        "name": doc.name,
+        "id": actual_doc_id,
+        "name": new_doc.name if new_doc else doc.name,
         "namespace": namespace,
         "chunks": chunks_count,
         "status": "reindexed",

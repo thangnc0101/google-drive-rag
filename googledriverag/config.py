@@ -41,7 +41,7 @@ class GoogleDriveConfig:
         "text/plain",
         "text/markdown",
     ])
-    max_file_size_mb: int = 50
+    max_file_size_mb: float = 50
 
 
 @dataclass
@@ -59,6 +59,7 @@ class EmbeddingConfig:
     api_key: str = ""
     model: str = "openai/text-embedding-3-small"
     dimensions: int = 512
+    provider_sort: str = ""
 
 
 @dataclass

@@ -6,7 +6,8 @@ from dataclasses import dataclass
 
 from googledriverag.gdrive.change_tracker import ChangeTracker
 from googledriverag.gdrive.client import DriveClient, DriveFile
-from googledriverag.services.ingestion_service import IngestionService
+from googledriverag.core.errors import ExternalAPIError
+from googledriverag.services.ingestion_service import IngestResult, IngestionService
 from googledriverag.services.namespace_manager import NamespaceManager
 from googledriverag.services.progress_store import ProgressStore
 from googledriverag.storage.namespace_storage import NamespaceStorage
@@ -43,11 +44,21 @@ class SyncService:
             storage = self.ns_manager.get_storage(ns_name)
 
             all_files: list[DriveFile] = []
+            failed_folders: list[str] = []
             for folder_id in ns_config.folder_ids:
                 try:
                     all_files.extend(self.drive.list_files(folder_id))
                 except Exception as e:
+                    failed_folders.append(folder_id)
                     logger.error("Failed to list folder %s: %s", folder_id, e)
+
+            if failed_folders:
+                logger.warning(
+                    "Skipping sync for namespace %s: %d/%d folder listings failed (%s); "
+                    "aborting to prevent accidental cascade deletion",
+                    ns_name, len(failed_folders), len(ns_config.folder_ids), failed_folders,
+                )
+                return SyncResult(namespace=ns_name, added=0, updated=0, deleted=0)
 
             tracker = ChangeTracker(storage)
             delta = tracker.detect_changes(all_files)
@@ -63,29 +74,56 @@ class SyncService:
             if self.progress and total_ingest > 0:
                 self.progress.start_sync(ns_name, total_ingest)
 
+            has_content_changes = len(delta.deleted) > 0
+            api_aborted = False
             try:
                 file_idx = 0
                 for file in delta.modified:
-                    doc = storage.sqlite.get_document_by_drive_id(file.id)
-                    if doc:
-                        self._delete_document(storage, doc.doc_id)
-                    await self._ingest_file(storage, file)
-                    logger.info("Updated document %s in %s", file.name, ns_name)
+                    try:
+                        result = await self._ingest_file(storage, file)
+                    except ExternalAPIError as e:
+                        logger.warning(
+                            "Aborting sync for namespace %s due to external API error: %s. "
+                            "Remaining %d files will be skipped.",
+                            ns_name, e, len(delta.modified) + len(delta.added) - file_idx,
+                        )
+                        api_aborted = True
+                        break
+                    if result is None:
+                        logger.warning("Failed to process %s in %s", file.name, ns_name)
+                    elif result.chunks_count > 0:
+                        has_content_changes = True
+                        logger.info("Updated document %s in %s (content changed)", file.name, ns_name)
+                    else:
+                        logger.info("Updated metadata for %s in %s (content unchanged)", file.name, ns_name)
                     file_idx += 1
                     if self.progress:
                         self.progress.update_sync_file(ns_name, file_idx)
 
-                for file in delta.added:
-                    await self._ingest_file(storage, file)
-                    logger.info("Added document %s to %s", file.name, ns_name)
-                    file_idx += 1
-                    if self.progress:
-                        self.progress.update_sync_file(ns_name, file_idx)
+                if not api_aborted:
+                    for file in delta.added:
+                        try:
+                            result = await self._ingest_file(storage, file)
+                        except ExternalAPIError as e:
+                            logger.warning(
+                                "Aborting sync for namespace %s due to external API error: %s. "
+                                "Remaining %d files will be skipped.",
+                                ns_name, e, len(delta.added) - (file_idx - len(delta.modified)),
+                            )
+                            api_aborted = True
+                            break
+                        if result and result.chunks_count > 0:
+                            has_content_changes = True
+                        if result:
+                            logger.info("Added document %s to %s", file.name, ns_name)
+                        file_idx += 1
+                        if self.progress:
+                            self.progress.update_sync_file(ns_name, file_idx)
             finally:
                 if self.progress:
                     self.progress.finish_sync(ns_name)
 
-            if delta.deleted or delta.modified or delta.added:
+            if has_content_changes:
                 storage.graph.detect_communities()
                 storage.graph.save()
 
@@ -100,10 +138,10 @@ class SyncService:
         tasks = [self.sync_namespace(ns) for ns in self.ns_manager.list_all_names()]
         return await asyncio.gather(*tasks)
 
-    async def _ingest_file(self, storage: NamespaceStorage, file: DriveFile):
+    async def _ingest_file(self, storage: NamespaceStorage, file: DriveFile, force_reindex: bool = False) -> IngestResult | None:
         try:
             file_bytes = self.drive.download_file(file.id, file.mimeType)
-            await self.ingestion.ingest_document(
+            return await self.ingestion.ingest_document(
                 file_bytes=file_bytes,
                 filename=file.name,
                 mime_type=file.mimeType,
@@ -111,9 +149,13 @@ class SyncService:
                 storage=storage,
                 drive_modified_time=file.modifiedTime,
                 url=file.webViewLink,
+                force_reindex=force_reindex,
             )
+        except ExternalAPIError:
+            raise
         except Exception as e:
-            logger.error("Failed to ingest %s: %s", file.name, e)
+            logger.error("Failed to ingest %s (drive_id=%s, force=%s): %s", file.name, file.id, force_reindex, e)
+            return None
 
     def _delete_document(self, storage: NamespaceStorage, doc_id: str):
         chunk_ids = [

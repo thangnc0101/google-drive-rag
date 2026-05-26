@@ -131,6 +131,48 @@ const SettingsPage = {
         </table>
       </div>
 
+      <!-- Oversized files section -->
+      <div class="bg-white rounded-lg shadow-sm border p-4 mt-4">
+        <div class="flex items-center justify-between mb-3">
+          <div class="text-sm font-medium text-gray-600">
+            Oversized Files
+            <span v-if="oversized" class="text-xs text-gray-400 font-normal">
+              (limit: {{ oversized.max_file_size_mb }} MB)
+            </span>
+          </div>
+          <button @click="loadOversized" :disabled="oversizedLoading"
+            class="px-3 py-1.5 text-sm rounded border bg-gray-50 hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed">
+            {{ oversizedLoading ? '⏳ Scanning...' : '🔍 Scan' }}
+          </button>
+        </div>
+        <div v-if="oversizedError" class="text-sm text-red-500">{{ oversizedError }}</div>
+        <div v-else-if="!oversized && !oversizedLoading" class="text-sm text-gray-400">
+          Click Scan to list files exceeding the size limit.
+        </div>
+        <div v-else-if="oversized && oversized.files.length === 0" class="text-sm text-gray-400">
+          No oversized files found.
+        </div>
+        <table v-else-if="oversized" class="w-full text-sm">
+          <thead>
+            <tr class="text-left text-gray-500 border-b">
+              <th class="pb-2 font-medium">Name</th>
+              <th class="pb-2 font-medium w-32">Namespace</th>
+              <th class="pb-2 font-medium w-24 text-right">Size</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="f in oversized.files" :key="f.id" class="border-b last:border-0 hover:bg-gray-50">
+              <td class="py-2 pr-2 truncate" style="max-width:340px" :title="f.name">
+                <a v-if="f.url" :href="f.url" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">{{ f.name }}</a>
+                <span v-else>{{ f.name }}</span>
+              </td>
+              <td class="py-2 text-gray-500">{{ f.namespace }}</td>
+              <td class="py-2 text-right text-gray-500">{{ formatSize(f.size) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
       <!-- System Stats section -->
       <div class="bg-white rounded-lg shadow-sm border p-4 mt-4">
         <div class="text-sm font-medium text-gray-600 mb-3">System Stats</div>
@@ -159,6 +201,9 @@ const SettingsPage = {
       progressTimer: null,
       stats: null,
       syncing: false,
+      oversized: null,
+      oversizedLoading: false,
+      oversizedError: '',
     };
   },
   computed: {
@@ -288,6 +333,22 @@ const SettingsPage = {
         await SharedUtils.apiFetch('/sync', { method: 'POST' });
       } catch (e) { console.error(e); }
       setTimeout(() => { this.syncing = false; }, 2000);
+    },
+    async loadOversized() {
+      this.oversizedLoading = true;
+      this.oversizedError = '';
+      try {
+        const resp = await SharedUtils.apiFetch('/oversized-files');
+        if (resp && resp.ok) {
+          this.oversized = await resp.json();
+        } else {
+          this.oversizedError = 'Failed to scan oversized files.';
+        }
+      } catch (e) {
+        console.error(e);
+        this.oversizedError = 'Failed to scan oversized files.';
+      }
+      this.oversizedLoading = false;
     },
   }
 };

@@ -7,8 +7,11 @@ import logging
 import httpx
 
 from googledriverag.config import LLMConfig
+from googledriverag.core.errors import ExternalAPIError
 
 logger = logging.getLogger(__name__)
+
+_RETRIABLE_STATUS = {401, 402, 403, 408, 429, 500, 502, 503, 504}
 
 
 class LLMClient:
@@ -52,11 +55,18 @@ class LLMClient:
 
         async with self.semaphore:
             client = await self._get_client()
-            resp = await client.post(
-                f"{self.config.base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self.config.api_key}"},
-                json={"model": model, "messages": messages, "temperature": 0},
-            )
+            try:
+                resp = await client.post(
+                    f"{self.config.base_url}/chat/completions",
+                    headers={"Authorization": f"Bearer {self.config.api_key}"},
+                    json={"model": model, "messages": messages, "temperature": 0},
+                )
+            except (httpx.TransportError, httpx.TimeoutException) as e:
+                raise ExternalAPIError(f"LLM API network error: {e}") from e
+            if resp.status_code in _RETRIABLE_STATUS:
+                raise ExternalAPIError(
+                    f"LLM API returned {resp.status_code}: {resp.text[:200]}"
+                )
             resp.raise_for_status()
             data = resp.json()
             self._record_call(model, data, call_context)

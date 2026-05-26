@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 
@@ -34,7 +35,7 @@ RAG_SYSTEM_PROMPT = """You are a helpful assistant that answers questions strict
 You must ONLY use information from the provided context below. Do NOT use your own knowledge or make up any information.
 If the context does not contain enough information to answer the question, clearly state that the provided documents do not contain the relevant information.
 Always respond in the same language as the user's question.
-{references_instruction}
+Always cite your sources using [ref_number] format (e.g. [1], [2]) corresponding to the ref numbers in the Document Chunks.
 {markdown_instruction}
 
 {context}"""
@@ -117,17 +118,13 @@ class QueryService:
 
         t0 = time.perf_counter()
         context = self._build_context(merged)
-        references_instruction = (
-            "Always cite your sources using [ref_number] format."
-            if self.config.show_references else ""
-        )
         markdown_instruction = (
             ""
             if self.config.query_response_markdown
             else "Do NOT use markdown formatting in your response. Respond in plain text only."
         )
         system_prompt = RAG_SYSTEM_PROMPT.format(
-            context=context, references_instruction=references_instruction,
+            context=context,
             markdown_instruction=markdown_instruction,
         )
         answer = await self.llm.complete_with_system(
@@ -138,9 +135,15 @@ class QueryService:
 
         logger.debug("[TIMING] query_total: %.3fs", time.perf_counter() - t_total)
 
+        cited_refs = self._extract_cited_refs(answer)
+        sources = self._build_sources(merged, cited_refs)
+
+        if not self.config.show_references:
+            answer = re.sub(r"\s*\[\d+\]", "", answer)
+
         return {
             "answer": answer,
-            "sources": self._build_sources(merged),
+            "sources": sources,
             "chunks": merged["chunks"][:top_k],
             "entities": merged.get("entities", [])[:20],
             "relations": merged.get("relations", [])[:20],
@@ -265,17 +268,39 @@ class QueryService:
 
         return "\n\n".join(parts) if parts else "No relevant context found."
 
-    def _build_sources(self, merged: dict) -> list[dict]:
+    def _extract_cited_refs(self, answer: str) -> set[int]:
+        return set(int(m) for m in re.findall(r"\[(\d+)\]", answer))
+
+    def _build_sources(self, merged: dict, cited_refs: set[int]) -> list[dict]:
         sources = []
         seen = set()
-        for i, chunk in enumerate(merged.get("chunks", [])[:10]):
+        chunks = merged.get("chunks", [])[:10]
+        for i, chunk in enumerate(chunks):
+            ref_num = i + 1
+            if ref_num not in cited_refs:
+                continue
             source_key = (chunk.get("source", ""), chunk.get("namespace", ""))
             if source_key not in seen:
                 seen.add(source_key)
+                doc_id = chunk.get("source", "")
+                ns_name = chunk.get("namespace", "")
+                file_name = ""
+                url = ""
+                if ns_name and doc_id:
+                    try:
+                        storage = self.ns_manager.get_storage(ns_name)
+                        doc_record = storage.sqlite.get_document(doc_id)
+                        if doc_record:
+                            file_name = doc_record.name
+                            url = doc_record.url
+                    except Exception:
+                        pass
                 sources.append({
-                    "document": chunk.get("source", ""),
-                    "namespace": chunk.get("namespace", ""),
+                    "document": doc_id,
+                    "namespace": ns_name,
                     "chunk_id": chunk.get("chunk_id", ""),
                     "page": chunk.get("page"),
+                    "file_name": file_name,
+                    "url": url,
                 })
         return sources
